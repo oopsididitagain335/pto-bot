@@ -40,7 +40,6 @@ async function getUserPTOUsage(channel, userId) {
   const cutoff = new Date(now.getTime() - ROLLING_WINDOW_DAYS * 24 * 60 * 60 * 1000);
   let total = 0;
 
-  // ✅ Fixed: limit <= 100
   const messages = await channel.messages.fetch({ limit: 100 });
   const validMessages = messages.filter(m => 
     !m.author.bot && m.createdTimestamp >= cutoff.getTime()
@@ -78,7 +77,6 @@ async function getCurrentlyOnPTO(channel) {
   const now = new Date();
   const results = [];
 
-  // ✅ Fixed: limit <= 100
   const messages = await channel.messages.fetch({ limit: 100 });
   const validMessages = messages.filter(m => !m.author.bot);
 
@@ -130,10 +128,10 @@ function formatTime(date) {
   }).format(date);
 }
 
-// Post current PTO status to log channel
-async function postCurrentPTOStatus(logChannel) {
+// Post current PTO status to a channel
+async function postCurrentPTOStatus(targetChannel) {
   try {
-    const currentOnPTO = await getCurrentlyOnPTO(logChannel);
+    const currentOnPTO = await getCurrentlyOnPTO(targetChannel);
     const totalOnPTO = currentOnPTO.length;
 
     let description = '';
@@ -155,7 +153,7 @@ async function postCurrentPTOStatus(logChannel) {
       footer: { text: 'PTO Status' },
     };
 
-    await logChannel.send({ embeds: [statusEmbed] });
+    await targetChannel.send({ embeds: [statusEmbed] });
   } catch (err) {
     console.error('Failed to post current PTO status:', err);
   }
@@ -176,20 +174,21 @@ client.on('ready', () => {
 
     console.log('🔒 Request channel locked: No one can delete messages.');
   }
-
-  // Post initial PTO status on startup
-  const logChannel = client.channels.cache.get(PTO_LOG_CHANNEL_ID);
-  if (logChannel) {
-    postCurrentPTOStatus(logChannel).catch(console.error);
-  } else {
-    console.warn('⚠️ Log channel not found on startup.');
-  }
 });
 
 // On message
 client.on('messageCreate', async (message) => {
-  if (message.channel.id !== PTO_REQUEST_CHANNEL_ID) return;
+  // ✅ Ignore bots and webhooks
   if (message.author.bot) return;
+
+  // ✅ Handle command: ,pto
+  if (message.content.trim() === ',pto') {
+    await postCurrentPTOStatus(message.channel);
+    return;
+  }
+
+  // ✅ Only process messages in PTO request channel
+  if (message.channel.id !== PTO_REQUEST_CHANNEL_ID) return;
 
   const match = PTO_REGEX.exec(message.content);
   if (!match) {
@@ -283,7 +282,7 @@ client.on('messageCreate', async (message) => {
 
   await logChannel.send({ embeds: [logEmbed] });
 
-  // Update current PTO status
+  // Update current PTO status in log channel
   await postCurrentPTOStatus(logChannel);
 });
 
