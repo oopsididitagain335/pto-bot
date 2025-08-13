@@ -6,7 +6,7 @@ const express = require('express');
 const TOKEN = process.env.TOKEN;
 const PORT = process.env.PORT || null;
 
-// Optional web server (for hosting platforms like Render/Railway)
+// Optional web server (for Render, Railway, etc.)
 if (PORT) {
   const app = express();
   app.get('/', (req, res) => res.send('PTO Bot is running.'));
@@ -24,12 +24,12 @@ const client = new Client({
 });
 
 // Channel IDs
-const PTO_REQUEST_CHANNEL_ID = '1405324971424612504'; // Where users send requests
-const PTO_LOG_CHANNEL_ID = '1405326441511653471';     // Bot logs and current PTO status
+const PTO_REQUEST_CHANNEL_ID = '1405324971424612504'; // User submits here
+const PTO_LOG_CHANNEL_ID = '1405326441511653471';     // Bot logs here
 
-const MAX_CONCURRENT_PTO = 4; // Max people on PTO at the same time
-const ROLLING_WINDOW_DAYS = 60;
-const MAX_PTO_PER_WINDOW = 14.0; // 14 days every 60 days
+const MAX_CONCURRENT_PTO = 4;           // Max people on PTO at once
+const ROLLING_WINDOW_DAYS = 60;         // Rolling window for PTO quota
+const MAX_PTO_PER_WINDOW = 14.0;        // 14 days per 60 days
 
 // Regex to parse: "Name - 5 days - Reason"
 const PTO_REGEX = /^(.+?)\s*-\s*(\d+(?:\.\d+)?)\s*days?\s*-\s*(.+)$/i;
@@ -40,8 +40,11 @@ async function getUserPTOUsage(channel, userId) {
   const cutoff = new Date(now.getTime() - ROLLING_WINDOW_DAYS * 24 * 60 * 60 * 1000);
   let total = 0;
 
-  const messages = await channel.messages.fetch({ limit: 200 });
-  const validMessages = messages.filter(m => !m.author.bot && m.createdTimestamp >= cutoff);
+  // ✅ Fixed: limit <= 100
+  const messages = await channel.messages.fetch({ limit: 100 });
+  const validMessages = messages.filter(m => 
+    !m.author.bot && m.createdTimestamp >= cutoff.getTime()
+  );
 
   for (const msg of validMessages.values()) {
     const match = PTO_REGEX.exec(msg.content);
@@ -67,7 +70,7 @@ async function getUserPTOUsage(channel, userId) {
     }
   }
 
-  return Math.round(total * 10) / 10;
+  return Math.round(total * 10) / 10; // Round to 1 decimal
 }
 
 // Get list of users currently on PTO (end time in future)
@@ -75,7 +78,8 @@ async function getCurrentlyOnPTO(channel) {
   const now = new Date();
   const results = [];
 
-  const messages = await channel.messages.fetch({ limit: 200 });
+  // ✅ Fixed: limit <= 100
+  const messages = await channel.messages.fetch({ limit: 100 });
   const validMessages = messages.filter(m => !m.author.bot);
 
   for (const msg of validMessages.values()) {
@@ -161,7 +165,7 @@ async function postCurrentPTOStatus(logChannel) {
 client.on('ready', () => {
   console.log(`✅ ${client.user.tag} is online.`);
 
-  // Lock request channel: no one can delete messages
+  // Lock request channel: prevent message deletion
   const requestChannel = client.channels.cache.get(PTO_REQUEST_CHANNEL_ID);
   if (requestChannel) {
     requestChannel.permissionOverwrites.edit(requestChannel.guild.roles.everyone, {
