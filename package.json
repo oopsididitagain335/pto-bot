@@ -1,0 +1,32 @@
+{
+  "name": "discord-pto-bot",
+  "version": "1.0.0",
+  "description": "A stealth PTO request tracker bot that uses a Discord channel as persistent memory.",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "nodemon bot.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "pto",
+    "vacation",
+    "timeoff",
+    "hr",
+    "automation"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.15.3",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
