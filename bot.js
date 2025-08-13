@@ -24,8 +24,9 @@ const client = new Client({
 });
 
 // Channel IDs
-const PTO_REQUEST_CHANNEL_ID = '1405324971424612504'; // User submits here
-const PTO_LOG_CHANNEL_ID = '1405326441511653471';     // Bot logs here
+const PTO_REQUEST_CHANNEL_ID = '1405324971424612504'; // User submits PTO
+const PTO_LOG_CHANNEL_ID = '1405326441511653471';     // Bot logs + memory
+const PTO_END_ANNOUNCE_CHANNEL_ID = '1405333223768068137'; // PTO end pings
 
 const MAX_CONCURRENT_PTO = 4;           // Max people on PTO at once
 const ROLLING_WINDOW_DAYS = 60;         // Rolling window for PTO quota
@@ -34,7 +35,22 @@ const MAX_PTO_PER_WINDOW = 14.0;        // 14 days per 60 days
 // Regex to parse: "Name - 5 days - Reason"
 const PTO_REGEX = /^(.+?)\s*-\s*(\d+(?:\.\d+)?)\s*days?\s*-\s*(.+)$/i;
 
-// Get total PTO used by user in the last 60 days
+// Format date as Discord relative timestamp
+function discordTimestamp(date) {
+  return `<t:${Math.floor(date.getTime() / 1000)}:R>`;
+}
+
+// Format date for display
+function formatTime(date) {
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(date);
+}
+
+// Get total PTO used by user in the last 60 days (from request channel)
 async function getUserPTOUsage(channel, userId) {
   const now = new Date();
   const cutoff = new Date(now.getTime() - ROLLING_WINDOW_DAYS * 24 * 60 * 60 * 1000);
@@ -69,7 +85,7 @@ async function getUserPTOUsage(channel, userId) {
     }
   }
 
-  return Math.round(total * 10) / 10; // Round to 1 decimal
+  return Math.round(total * 10) / 10; // 1 decimal
 }
 
 // Get list of users currently on PTO (end time in future)
@@ -104,31 +120,24 @@ async function getCurrentlyOnPTO(channel) {
         if (member) userId = member.id;
       }
 
-      results.push({
-        userId,
-        username: userPart.trim(),
-        days: durationDays,
-        reason: reason.trim(),
-        endTime,
-        message: msg,
-      });
+      if (userId) {
+        results.push({
+          userId,
+          username: userPart.trim(),
+          days: durationDays,
+          reason: reason.trim(),
+          startTime: requestTime,
+          endTime,
+          message: msg,
+        });
+      }
     }
   }
 
-  return results;
+  return results.sort((a, b) => a.endTime - b.endTime);
 }
 
-// Format date nicely
-function formatTime(date) {
-  return new Intl.DateTimeFormat('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  }).format(date);
-}
-
-// Post current PTO status to a channel
+// Post current PTO status to any channel
 async function postCurrentPTOStatus(targetChannel) {
   try {
     const currentOnPTO = await getCurrentlyOnPTO(targetChannel);
@@ -140,8 +149,8 @@ async function postCurrentPTOStatus(targetChannel) {
       description = '📭 No one is currently on PTO.';
     } else {
       description = currentOnPTO.map(p => {
-        const userTag = p.userId ? `<@${p.userId}>` : p.username;
-        return `• ${userTag} (**${p.days} days**) – _${p.reason}_ (ends ${formatTime(p.endTime)})`;
+        const userTag = `<@${p.userId}>`;
+        return `• ${userTag} (**${p.days}d**) – _${p.reason}_ ends ${discordTimestamp(p.endTime)}`;
       }).join('\n');
     }
 
@@ -150,7 +159,7 @@ async function postCurrentPTOStatus(targetChannel) {
       description,
       color: totalOnPTO >= MAX_CONCURRENT_PTO ? 0xff0000 : totalOnPTO >= MAX_CONCURRENT_PTO - 1 ? 0xffaa00 : 0x00ff00,
       timestamp: new Date(),
-      footer: { text: 'PTO Status' },
+      footer: { text: 'PTO Tracker' },
     };
 
     await targetChannel.send({ embeds: [statusEmbed] });
@@ -159,11 +168,65 @@ async function postCurrentPTOStatus(targetChannel) {
   }
 }
 
+// Track scheduled timeouts (userId → timeout)
+const scheduledTimeouts = new Map();
+
+// Schedule alert when PTO ends
+async function schedulePTOEndAlert(userId, days, messageTime, logChannel) {
+  const user = await client.users.fetch(userId).catch(() => null);
+  if (!user) return;
+
+  const announceChannel = client.channels.cache.get(PTO_END_ANNOUNCE_CHANNEL_ID);
+  const requestTime = new Date(messageTime);
+  const endTime = new Date(requestTime.getTime() + days * 24 * 60 * 60 * 1000);
+  const now = new Date();
+
+  if (endTime <= now) return;
+
+  const delay = endTime - now;
+
+  // Clear existing timeout
+  if (scheduledTimeouts.has(userId)) {
+    clearTimeout(scheduledTimeouts.get(userId));
+    scheduledTimeouts.delete(userId);
+  }
+
+  const timeout = setTimeout(async () => {
+    // Send DM
+    await user.send({
+      content: `⏰ Your PTO has ended! You were off for **${days} days**. Welcome back!`
+    }).catch(() => {});
+
+    // Announce in channel
+    if (announceChannel) {
+      await announceChannel.send({
+        content: `<@${userId}> 🎉 **Welcome back!** Your PTO has ended. You were off for **${days} days**.`,
+      });
+    }
+
+    // Log in PTO log channel
+    if (logChannel) {
+      await logChannel.send({
+        embeds: [{
+          title: '🔚 PTO Ended',
+          description: `<@${userId}> has returned from **${days} days** of PTO.`,
+          color: 0x777777,
+          timestamp: new Date(),
+        }]
+      });
+    }
+
+    scheduledTimeouts.delete(userId);
+  }, delay);
+
+  scheduledTimeouts.set(userId, timeout);
+}
+
 // On ready
 client.on('ready', () => {
   console.log(`✅ ${client.user.tag} is online.`);
 
-  // Lock request channel: prevent message deletion
+  // Lock request channel
   const requestChannel = client.channels.cache.get(PTO_REQUEST_CHANNEL_ID);
   if (requestChannel) {
     requestChannel.permissionOverwrites.edit(requestChannel.guild.roles.everyone, {
@@ -171,23 +234,43 @@ client.on('ready', () => {
       ViewChannel: true,
       SendMessages: true,
     }).catch(console.error);
+    console.log('🔒 Request channel locked.');
+  }
 
-    console.log('🔒 Request channel locked: No one can delete messages.');
+  // Restore active PTO alerts from log channel
+  const logChannel = client.channels.cache.get(PTO_LOG_CHANNEL_ID);
+  if (logChannel) {
+    logChannel.messages.fetch({ limit: 100 }).then(messages => {
+      const validMessages = messages.filter(m => !m.author.bot);
+      for (const msg of validMessages.values()) {
+        const match = PTO_REGEX.exec(msg.content);
+        if (!match) continue;
+
+        const mentionMatch = msg.content.match(/<@!?(\d+)>/);
+        if (!mentionMatch) continue;
+
+        const userId = mentionMatch[1];
+        const days = parseFloat(match[2]);
+        if (isNaN(days)) continue;
+
+        const requestTime = msg.createdTimestamp;
+        schedulePTOEndAlert(userId, days, requestTime, logChannel);
+      }
+    }).catch(console.error);
   }
 });
 
 // On message
 client.on('messageCreate', async (message) => {
-  // ✅ Ignore bots and webhooks
   if (message.author.bot) return;
 
-  // ✅ Handle command: ,pto
+  // Handle ,pto command
   if (message.content.trim() === ',pto') {
     await postCurrentPTOStatus(message.channel);
     return;
   }
 
-  // ✅ Only process messages in PTO request channel
+  // Only process in request channel
   if (message.channel.id !== PTO_REQUEST_CHANNEL_ID) return;
 
   const match = PTO_REGEX.exec(message.content);
@@ -200,7 +283,7 @@ client.on('messageCreate', async (message) => {
   }
 
   const [, userPart, daysStr, reason] = match;
-  const requestedDays = parseFloat(daysStr);
+  const requestedDays = Math.round(parseFloat(daysStr) * 10) / 10;
 
   if (isNaN(requestedDays) || requestedDays <= 0) {
     await message.reply({ content: '❌ Invalid number of days.' });
@@ -229,60 +312,59 @@ client.on('messageCreate', async (message) => {
 
   if (!userId || userId !== message.author.id) {
     await message.reply({
-      content: "⚠️ You can only submit PTO for yourself. Use your @mention or your exact name.",
+      content: "⚠️ You can only submit PTO for yourself.",
     });
     return;
   }
 
   const requestChannel = message.channel;
   const logChannel = client.channels.cache.get(PTO_LOG_CHANNEL_ID);
-
-  if (!logChannel) {
-    console.error('❌ Log channel not accessible.');
-    return;
-  }
+  if (!logChannel) return;
 
   // 1. Check 60-day quota
   const usedPTO = await getUserPTOUsage(requestChannel, userId);
-  const remainingQuota = MAX_PTO_PER_WINDOW - usedPTO;
+  const remaining = MAX_PTO_PER_WINDOW - usedPTO;
 
-  if (requestedDays > remainingQuota) {
-    const denialMsg = `❌ **Denied:** You've used **${usedPTO.toFixed(1)}/${MAX_PTO_PER_WINDOW}** days in the last ${ROLLING_WINDOW_DAYS} days.\nRequested: **${requestedDays}**, but only **${remainingQuota.toFixed(1)}** days remaining.`;
-    await message.reply({ content: denialMsg });
+  if (requestedDays > remaining) {
+    await message.reply({
+      content: `❌ **Denied:** Used ${usedPTO.toFixed(1)}/14 days. Only ${remaining.toFixed(1)} days left.`,
+    });
     return;
   }
 
-  // 2. Check concurrent PTO limit
+  // 2. Check concurrent limit
   const currentOnPTO = await getCurrentlyOnPTO(requestChannel);
-  const totalOnPTO = currentOnPTO.length;
-
-  if (totalOnPTO >= MAX_CONCURRENT_PTO) {
-    const denialMsg = `🚫 **Slot Full:** ${MAX_CONCURRENT_PTO} people are already on PTO. Wait for someone to return.`;
-    await message.reply({ content: denialMsg });
+  if (currentOnPTO.length >= MAX_CONCURRENT_PTO) {
+    await message.reply({
+      content: `🚫 Max ${MAX_CONCURRENT_PTO} people on PTO. Wait for someone to return.`,
+    });
     return;
   }
 
   // ✅ APPROVED
   const userMention = `<@${userId}>`;
-  const approvalMsg = `✅ **Approved:** ${userMention} requested **${requestedDays} days** off for _${reason.trim()}_`;
-
-  await message.reply({ content: approvalMsg });
+  await message.reply({
+    content: `✅ **Approved:** ${userMention} requested **${requestedDays} days** off for _${reason.trim()}_`,
+  });
 
   // Log to log channel
-  const logEmbed = {
-    title: '✅ PTO Approved',
-    description: `${userMention} is off for **${requestedDays} days**\n> _${reason.trim()}_`,
-    fields: [
-      { name: 'Used (60d)', value: `${(usedPTO + requestedDays).toFixed(1)}/${MAX_PTO_PER_WINDOW}`, inline: true },
-      { name: 'Ends', value: formatTime(new Date(Date.now() + requestedDays * 24 * 60 * 60 * 1000)), inline: true },
-    ],
-    color: 0x00ff00,
-    timestamp: new Date(),
-  };
+  await logChannel.send({
+    embeds: [{
+      title: '✅ PTO Approved',
+      description: `${userMention} is off for **${requestedDays} days**\n> _${reason.trim()}_`,
+      fields: [
+        { name: 'Used (60d)', value: `${(usedPTO + requestedDays).toFixed(1)}/${MAX_PTO_PER_WINDOW}`, inline: true },
+        { name: 'Ends', value: discordTimestamp(new Date(message.createdTimestamp + requestedDays * 24 * 60 * 60 * 1000)), inline: true },
+      ],
+      color: 0x00ff00,
+      timestamp: new Date(),
+    }]
+  });
 
-  await logChannel.send({ embeds: [logEmbed] });
+  // Schedule end alert
+  schedulePTOEndAlert(userId, requestedDays, message.createdTimestamp, logChannel);
 
-  // Update current PTO status in log channel
+  // Update status
   await postCurrentPTOStatus(logChannel);
 });
 
