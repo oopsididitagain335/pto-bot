@@ -40,16 +40,6 @@ function discordTimestamp(date) {
   return `<t:${Math.floor(date.getTime() / 1000)}:R>`;
 }
 
-// Format date for display
-function formatTime(date) {
-  return new Intl.DateTimeFormat('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  }).format(date);
-}
-
 // Get total PTO used by user in the last 60 days (from request channel)
 async function getUserPTOUsage(channel, userId) {
   const now = new Date();
@@ -140,6 +130,7 @@ async function getCurrentlyOnPTO(channel) {
 // Post current PTO status to any channel
 async function postCurrentPTOStatus(targetChannel) {
   try {
+    // Force fresh fetch
     const currentOnPTO = await getCurrentlyOnPTO(targetChannel);
     const totalOnPTO = currentOnPTO.length;
 
@@ -270,6 +261,61 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
+  // Handle ,resetpto command
+  if (message.content.startsWith(',resetpto')) {
+    const args = message.content.slice(',resetpto'.length).trim().split(/\s+/);
+    if (args.length !== 1) {
+      await message.reply('❌ Usage: `,resetpto @user`');
+      return;
+    }
+
+    const mentionedUser = message.mentions.users.first();
+    if (!mentionedUser) {
+      await message.reply('❌ Please mention a valid user.');
+      return;
+    }
+
+    // Check if user has permission (e.g., Administrator or a specific role)
+    if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+      await message.reply('❌ You do not have permission to use this command.');
+      return;
+    }
+
+    const logChannel = client.channels.cache.get(PTO_LOG_CHANNEL_ID);
+    if (!logChannel) {
+      await message.reply('❌ Log channel not found.');
+      return;
+    }
+
+    const userId = mentionedUser.id;
+
+    // Clear scheduled timeout
+    if (scheduledTimeouts.has(userId)) {
+      clearTimeout(scheduledTimeouts.get(userId));
+      scheduledTimeouts.delete(userId);
+    }
+
+    // Fetch messages and delete any PTO logs for this user
+    const messages = await logChannel.messages.fetch({ limit: 100 });
+    const userLogs = messages.filter(msg =>
+      msg.embeds.length > 0 &&
+      msg.embeds[0].description?.includes(`<@${userId}>`) &&
+      (msg.embeds[0].title === '✅ PTO Approved' || msg.embeds[0].title === '🔚 PTO Ended')
+    );
+
+    for (const msg of userLogs.values()) {
+      await msg.delete().catch(() => {});
+    }
+
+    await message.reply({
+      content: `✅ Reset PTO history for <@${userId}>. They can now request time off again.`
+    });
+
+    // Update status
+    await postCurrentPTOStatus(logChannel);
+    return;
+  }
+
   // Only process in request channel
   if (message.channel.id !== PTO_REQUEST_CHANNEL_ID) return;
 
@@ -347,25 +393,28 @@ client.on('messageCreate', async (message) => {
     content: `✅ **Approved:** ${userMention} requested **${requestedDays} days** off for _${reason.trim()}_`,
   });
 
-  // Log to log channel
-  await logChannel.send({
-    embeds: [{
-      title: '✅ PTO Approved',
-      description: `${userMention} is off for **${requestedDays} days**\n> _${reason.trim()}_`,
-      fields: [
-        { name: 'Used (60d)', value: `${(usedPTO + requestedDays).toFixed(1)}/${MAX_PTO_PER_WINDOW}`, inline: true },
-        { name: 'Ends', value: discordTimestamp(new Date(message.createdTimestamp + requestedDays * 24 * 60 * 60 * 1000)), inline: true },
-      ],
-      color: 0x00ff00,
-      timestamp: new Date(),
-    }]
-  });
+  // ✅ Log to log channel
+  const logEmbed = {
+    title: '✅ PTO Approved',
+    description: `${userMention} is off for **${requestedDays} days**\n> _${reason.trim()}_`,
+    fields: [
+      { name: 'Used (60d)', value: `${(usedPTO + requestedDays).toFixed(1)}/${MAX_PTO_PER_WINDOW}`, inline: true },
+      { name: 'Ends', value: discordTimestamp(new Date(message.createdTimestamp + requestedDays * 24 * 60 * 60 * 1000)), inline: true },
+    ],
+    color: 0x00ff00,
+    timestamp: new Date(),
+  };
 
-  // Schedule end alert
+  // ✅ Wait for log message to be sent before updating status
+  await logChannel.send({ embeds: [logEmbed] });
+
+  // ✅ Schedule alert
   schedulePTOEndAlert(userId, requestedDays, message.createdTimestamp, logChannel);
 
-  // Update status
-  await postCurrentPTOStatus(logChannel);
+  // ✅ Wait a moment for consistency, then update status
+  setTimeout(() => {
+    postCurrentPTOStatus(logChannel).catch(console.error);
+  }, 1000);
 });
 
 // Login
